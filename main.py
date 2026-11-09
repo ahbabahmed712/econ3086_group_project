@@ -108,18 +108,13 @@ def strongest_key(results):
     return best_key
 
 
-def run(offline):
-    """Run the full lead-lag pipeline and write output/."""
-    print(f"Lead-lag monitor starting. Offline={offline}.")
-    print("Step 1: find markets.")
+def load_analysis(offline):
+    """Load markets and prices, then return the verdicts. Does not send the report."""
     markets = collect_markets(offline)
-    print("Step 2: download odds for the highest-volume matches and filter.")
     downloaded, early_rejected = download_top_odds(markets, offline)
     chosen, rejected = select_markets(downloaded)
     for item in early_rejected:
         rejected.append(item)
-    print(f"Markets kept: {len(chosen)}. Markets rejected: {len(rejected)}.")
-    print("Step 3: download asset prices.")
     start, end = price_window(chosen)
     assets = {}
     price_levels = {}
@@ -132,16 +127,13 @@ def run(offline):
             price_levels[name] = prices
             assets[name] = to_returns(prices)
             print(f"  {name}: {len(prices)} prices, {len(assets[name])} returns.")
-    print("Step 4: lead-lag tests.")
     results = analyse_all(chosen, assets)
-    print("Step 5: verdicts.")
     verdict_rows = []
     for key, result in results.items():
         market_name, asset_name = key
         label, reason = make_verdict(result)
         result["verdict"] = label
         result["reason"] = reason
-        print(f"  {market_name} vs {asset_name}: {label}")
         verdict_rows.append(
             {
                 "market": market_name,
@@ -151,10 +143,36 @@ def run(offline):
                 "lag": result["best_lag"],
                 "n_obs": result["n_obs"],
                 "corr": result["corr"],
+                "p_value": result["p_value"],
+                "adjusted_p": result["adjusted_p"],
+                "granger_forward": result["granger_odds_to_asset_p"],
+                "granger_back": result["granger_asset_to_odds_p"],
                 "adf_odds_p": result["adf_odds_p"],
                 "adf_asset_p": result["adf_asset_p"],
             }
         )
+    return {
+        "chosen": chosen,
+        "rejected": rejected,
+        "results": results,
+        "verdict_rows": verdict_rows,
+        "price_levels": price_levels,
+    }
+
+
+def run(offline):
+    """Run the full lead-lag pipeline and write output/."""
+    print(f"Lead-lag monitor starting. Offline={offline}.")
+    print("Steps 1 to 5: markets, odds, prices, tests, verdicts.")
+    bundle = load_analysis(offline)
+    chosen = bundle["chosen"]
+    rejected = bundle["rejected"]
+    results = bundle["results"]
+    verdict_rows = bundle["verdict_rows"]
+    price_levels = bundle["price_levels"]
+    print(f"Markets kept: {len(chosen)}. Markets rejected: {len(rejected)}.")
+    for row in verdict_rows:
+        print(f"  {row['market']} vs {row['asset']}: {row['verdict']}")
     print("Step 6: quick synthetic check (the full list is python tests.py).")
     try:
         test_synthetic_lead()

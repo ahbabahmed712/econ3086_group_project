@@ -7,3 +7,4 @@ statsmodels==0.15.0
 matplotlib==3.10.8
 python-dotenv==1.2.4
 gspread==6.2.1
+streamlit==1.67.0

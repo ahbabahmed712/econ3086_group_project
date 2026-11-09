@@ -23,7 +23,10 @@ From this folder:
 python main.py
 python main.py --offline
 python tests.py
+streamlit run demo_app.py
 ```
+
+`demo_app.py` is the live-demo page. It opens in the browser. Leave the sidebar on **Cached files** so the talk still works if the Wi-Fi or the API fails. Use the market box, the asset box, and the lag buttons to walk through one pair. Choose **Fetch live** only when you want a fresh download.
 
 The first command calls Polymarket and Yahoo Finance, writes CSV files under `data/`, and writes charts plus `output/report.txt`. The offline command uses those files only. `tests.py` prints PASS or FAIL for each check. On 9 Nov 2026 it printed `13 passed, 0 failed`.
 

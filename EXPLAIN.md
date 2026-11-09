@@ -96,6 +96,16 @@ The list endpoint has no keyword argument. That was checked in the docs. `find_m
 - Known event: an empty `KNOWN_EVENT` prints that the program does not invent one. A separate synthetic window checks that a filled dictionary prints dates and a lag.
 - Calibration: hand-made resolved rows. Two of three markets with odds from 60 to 80 percent resolve Yes, so the share is 2/3. The daily run does not download closed markets, so this check is not claiming a live calibration.
 
+## demo_app.py
+
+This is the page for the live talk. Run it with `streamlit run demo_app.py`. It calls `load_analysis` from `main.py`, so the numbers are the same as the command-line report. It does not contain a second copy of the statistics.
+
+The sidebar starts on cached files. That is the safe demo path. "Fetch live" is a button, so opening the page does not call the API by itself. `st.session_state` is a dictionary Streamlit keeps while the page is open. The tests are stored there on the first load, so changing the market dropdown does not run Granger again.
+
+The lag buttons do not change the verdict. They only highlight one lag and show the correlation the program already computed. Dark blue is the best lag. The verdict box is green, amber, or red so it can be read from the back of the room.
+
+**Why Streamlit?** It is a Python library that turns the same functions into a clickable page. The professor's library marks include charts and working with other systems. The calculation still lives in the other files.
+
 ## report.py and main.py
 
 `report.py` writes three kinds of pictures to `output/`: a bar chart of correlation by lag for each pair, an overlay of odds and the asset for the pair with the largest absolute correlation, and a verdict table. It also writes `report.txt` with f-strings.

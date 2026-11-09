@@ -26,8 +26,8 @@ LIMITS_TEXT = (
 
 
 # Why: the chart has to show every lag, with the chosen lag easy to see.
-def save_lag_chart(market_name, asset_name, profile, best_lag, path):
-    """Bar chart of correlation at each lag. The best lag is drawn in a darker colour."""
+def make_lag_figure(asset_name, profile, best_lag, selected_lag=None):
+    """Bar chart of correlation at each lag. Dark blue is the best lag."""
     labels = []
     values = []
     colors = []
@@ -36,6 +36,8 @@ def save_lag_chart(market_name, asset_name, profile, best_lag, path):
         values.append(row["corr"])
         if row["lag"] == best_lag:
             colors.append("#1f4e79")
+        elif selected_lag is not None and row["lag"] == selected_lag:
+            colors.append("#b85c38")
         else:
             colors.append("#8fadc8")
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -45,21 +47,36 @@ def save_lag_chart(market_name, asset_name, profile, best_lag, path):
     ax.set_ylabel("Correlation")
     ax.set_title(f"{asset_name}: best lag {best_lag}")
     fig.tight_layout()
+    return fig
+
+
+# Why: main.py still needs a PNG on disk. The demo page uses the figure itself.
+def save_lag_chart(market_name, asset_name, profile, best_lag, path):
+    """Save the lag chart. market_name is kept so older calls stay the same."""
+    fig = make_lag_figure(asset_name, profile, best_lag)
     fig.savefig(path)
     plt.close(fig)
 
 
 # Why: a person should be able to look at the two series, not only at a p-value.
-def save_overlay(odds, prices, title, path):
-    """Plot daily odds and the asset price on the same dates, with two scales."""
+def make_overlay_figure(odds, prices, title):
+    """Plot daily odds and the asset price on two scales. Returns the figure."""
     fig, ax_left = plt.subplots(figsize=(9, 4))
     ax_right = ax_left.twinx()
-    ax_left.plot(list(odds.index), list(odds.values), color="#1f4e79", label="Odds")
-    ax_right.plot(list(prices.index), list(prices.values), color="#b85c38", label="Asset")
+    if odds is not None and len(odds) > 0:
+        ax_left.plot(list(odds.index), list(odds.values), color="#1f4e79", label="Odds")
+    if prices is not None and len(prices) > 0:
+        ax_right.plot(list(prices.index), list(prices.values), color="#b85c38", label="Asset")
     ax_left.set_ylabel("Odds (Yes price)")
     ax_right.set_ylabel("Asset price")
     ax_left.set_title(title)
     fig.tight_layout()
+    return fig
+
+
+def save_overlay(odds, prices, title, path):
+    """Save the odds-versus-price chart to path."""
+    fig = make_overlay_figure(odds, prices, title)
     fig.savefig(path)
     plt.close(fig)
 
