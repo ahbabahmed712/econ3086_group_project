@@ -12,7 +12,8 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 # Nasdaq is the Nasdaq Composite index.
 ASSETS = {"Gold": "GC=F", "Dollar": "DX-Y.NYB", "Nasdaq": "^IXIC"}
 
-# Words we look for in the Polymarket question text.
+# Words that reserve the core quota. A question with one of these stays in the
+# Fed-style sample even when a politics or crypto market has more volume.
 MARKET_KEYWORDS = ["Fed", "rate cut", "recession", "inflation"]
 
 # A market must clear both hurdles before we test it.
@@ -34,11 +35,20 @@ FREQUENCY = "daily"
 MARKET_PAGE_SIZE = 100
 MAX_MARKET_PAGES = 8
 
-# How many high-volume names we download odds for. Keeps the demo short.
-MAX_DOWNLOADS = 8
+# Odds histories downloaded before the liquidity cut. The two pools are capped
+# separately so a long core list and a long wider list each get a chance.
+MAX_CORE_DOWNLOADS = 8
+MAX_WIDER_DOWNLOADS = 15
 
-# At most this many markets go into the lead-lag test.
+# At most this many core markets go into the lead-lag test.
 MAX_SELECTED = 5
+
+# Other liquid events, on top of the core. One headline market per event.
+MAX_EXTRA_SELECTED = 10
+
+# Gamma GET /events uses the same paging idea as /markets.
+# Docs: https://docs.polymarket.com/api-reference/events/list-events
+MAX_EVENT_PAGES = 3
 
 # CLOB price history. Docs: https://docs.polymarket.com/api-reference/markets/get-prices-history
 # interval is one of max, all, 1m, 1w, 1d, 6h, 1h. fidelity is in minutes.

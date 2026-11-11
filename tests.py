@@ -18,7 +18,15 @@ from leadlag import (
     cross_corr,
     granger_both_ways,
 )
-from polymarket import as_float, parse_json_list, parse_market, parse_price_history, yes_token_id
+from polymarket import (
+    as_float,
+    event_id_from_raw,
+    markets_from_events,
+    parse_json_list,
+    parse_market,
+    parse_price_history,
+    yes_token_id,
+)
 from prices import close_from_frame, to_returns
 from report import append_sheet, build_report, make_lag_figure, send_telegram
 from verdict import make_verdict
@@ -60,6 +68,24 @@ def test_parse_helpers():
     assert market["yes_token_id"] == "yes-token"
     assert market["volume"] == 250000
     assert market["closed"] is False
+    assert market["event_id"] == ""
+    nested = dict(raw)
+    nested["events"] = [{"id": "55", "title": "Fed"}]
+    assert event_id_from_raw(nested) == "55"
+    assert parse_market(nested)["event_id"] == "55"
+    events = [
+        {
+            "id": "77",
+            "markets": [
+                {"id": "1", "question": "Bitcoin above 100k?", "volumeNum": 10, "closed": False},
+                {"id": "2", "question": "Bitcoin above 200k?", "volumeNum": 99, "closed": False},
+            ],
+        }
+    ]
+    parsed_events = markets_from_events(events)
+    assert len(parsed_events) == 2
+    assert parsed_events[0]["event_id"] == "77"
+    assert parsed_events[1]["market_id"] == "2"
     payload = {"history": [{"t": 1700000000, "p": 0.4}, {"t": 1700086400, "p": 0.5}]}
     series = parse_price_history(payload)
     assert len(series) == 2
@@ -106,6 +132,88 @@ def test_is_liquid_and_select():
     assert chosen[0]["market_id"] == "a"
     assert len(rejected) == 2
     _say("filters", True)
+
+
+def _liquid(question, market_id, volume, event_id, group):
+    """One made-up market that clears the volume and history hurdles."""
+    return {
+        "question": question,
+        "market_id": market_id,
+        "volume": volume,
+        "n_points": 40,
+        "closed": False,
+        "event_id": event_id,
+        "group": group,
+    }
+
+
+def test_core_kept_beside_larger_wider_market():
+    """A smaller Fed market stays when a larger non-Fed market is in the same list."""
+    fed = _liquid("Will the Fed cut rates?", "fed", 150000, "fed-event", "core")
+    crypto = _liquid("Will Bitcoin trade above 100000?", "btc", 9000000, "btc-event", "wider")
+    chosen, rejected = select_markets([crypto, fed])
+    ids = []
+    for market in chosen:
+        ids.append(market["market_id"])
+    assert "fed" in ids
+    assert "btc" in ids
+    assert len(rejected) == 0
+    _say("core quota", True)
+
+
+def test_one_headline_per_event():
+    """The second contract in an event is dropped when another event is available."""
+    first = _liquid("Will candidate A win the election?", "a", 500000, "election", "wider")
+    second = _liquid("Will candidate B win the election?", "b", 400000, "election", "wider")
+    other = _liquid("Will Bitcoin trade above 200000?", "c", 300000, "crypto", "wider")
+    chosen, rejected = select_markets([second, other, first])
+    ids = []
+    for market in chosen:
+        ids.append(market["market_id"])
+    assert "a" in ids
+    assert "c" in ids
+    assert "b" not in ids
+    found_reason = False
+    for item in rejected:
+        if item["question"] == second["question"] and "same event" in item["reason"]:
+            found_reason = True
+    assert found_reason is True
+    _say("one headline per event", True)
+
+
+def test_full_and_core_pvalues():
+    """The verdict p-value counts every pair. The core-only p-value counts core pairs."""
+    index = pandas.date_range("2026-01-01", periods=40, freq="D")
+    rng = numpy.random.default_rng(3)
+    base = numpy.linspace(-1, 1, 40)
+    odds_change = pandas.Series(base + rng.normal(0, 0.05, 40), index=index)
+    returns = pandas.Series(base * 0.5 + rng.normal(0, 0.2, 40), index=index)
+    markets = [
+        {"question": "Will the Fed cut rates?", "group": "core", "odds_change": odds_change},
+        {"question": "Will Bitcoin trade above 100000?", "group": "wider", "odds_change": odds_change},
+    ]
+    assets = {"Gold": returns}
+    results = analyse_all(markets, assets)
+    n_lags = config.MAX_LAG * 2 + 1
+    core = results[("Will the Fed cut rates?", "Gold")]
+    wider = results[("Will Bitcoin trade above 100000?", "Gold")]
+    assert core["group"] == "core"
+    assert wider["group"] == "wider"
+    assert wider["core_adjusted_p"] is None
+    assert core["p_value"] > 0
+    full_expected = core["p_value"] * 2 * n_lags
+    if full_expected > 1:
+        full_expected = 1.0
+    core_expected = core["p_value"] * n_lags
+    if core_expected > 1:
+        core_expected = 1.0
+    assert abs(core["adjusted_p"] - full_expected) < 1e-9
+    assert abs(core["core_adjusted_p"] - core_expected) < 1e-9
+    wider_expected = wider["p_value"] * 2 * n_lags
+    if wider_expected > 1:
+        wider_expected = 1.0
+    assert abs(wider["adjusted_p"] - wider_expected) < 1e-9
+    _say("full and core p-values", True)
 
 
 def test_returns_and_close():
@@ -425,22 +533,26 @@ def calibration_table(rows):
 
 def test_report_and_delivery():
     """The report text contains the limits paragraph. Empty secrets do not raise."""
-    chosen = [{"question": "Sample", "volume": 10, "n_points": 30}]
+    chosen = [{"question": "Sample", "volume": 10, "n_points": 30, "group": "core"}]
     rejected = [{"question": "Other", "reason": "volume is below the minimum"}]
     verdicts = [
         {
             "market": "Sample",
             "asset": "Gold",
+            "group": "core",
             "verdict": "NO RELIABLE LEAD",
             "reason": "checks failed",
             "n_obs": 30,
             "corr": 0.1,
             "adf_odds_p": 0.2,
             "adf_asset_p": 0.3,
+            "core_adjusted_p": 0.2,
         }
     ]
     text = build_report(chosen, rejected, verdicts, when="2026-11-09 00:00 UTC")
     assert "NO RELIABLE LEAD" in text
+    assert "[core]" in text
+    assert "Core-only adjusted p=0.200" in text
     assert "does not prove causation" in text
     assert send_telegram("hello", token="", chat_id="") is False
     profile = [{"lag": -1, "corr": 0.1}, {"lag": 0, "corr": 0.2}, {"lag": 1, "corr": 0.4}]
@@ -457,6 +569,8 @@ def run_all():
     tests = [
         test_parse_helpers,
         test_is_liquid_and_select,
+        test_core_kept_beside_larger_wider_market,
+        test_one_headline_per_event,
         test_returns_and_close,
         test_align,
         test_corr_and_bonferroni,
@@ -464,6 +578,7 @@ def run_all():
         test_reverse_lead,
         test_verdicts,
         test_analyse_all_and_adf,
+        test_full_and_core_pvalues,
         test_placebo,
         test_known_event,
         test_calibration,

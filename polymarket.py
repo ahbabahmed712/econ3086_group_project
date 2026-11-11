@@ -45,6 +45,22 @@ def yes_token_id(token_ids, outcomes):
     return str(token_ids[0])
 
 
+# Why: /markets sometimes nests the parent event, and /events always has an id.
+def event_id_from_raw(raw):
+    """Return the parent event id, or an empty string when the payload has none."""
+    direct = raw.get("eventId")
+    if direct is None or direct == "":
+        direct = raw.get("event_id")
+    if direct is not None and direct != "":
+        return str(direct)
+    events = raw.get("events")
+    if isinstance(events, list):
+        for event in events:
+            if isinstance(event, dict) and event.get("id") not in (None, ""):
+                return str(event.get("id"))
+    return ""
+
+
 # Why: the rest of the program should not depend on the raw API field names.
 def parse_market(raw):
     """Turn one Gamma market object into a small dictionary."""
@@ -59,6 +75,7 @@ def parse_market(raw):
     market = {
         "question": str(raw.get("question") or ""),
         "market_id": str(raw.get("id") or ""),
+        "event_id": event_id_from_raw(raw),
         "token_ids": [str(token) for token in token_ids],
         "yes_token_id": yes_token_id(token_ids, outcomes),
         "volume": as_float(volume),
@@ -148,7 +165,7 @@ def fetch_market_pages(offline=False):
 def _read_pages_cache(cache_path):
     """Read the cached market pages. Missing or broken files become an empty list."""
     if not os.path.exists(cache_path):
-        print(f"No cached market list at {cache_path}.")
+        print(f"No cached list at {cache_path}.")
         return []
     try:
         with open(cache_path, "r", encoding="utf-8") as handle:
@@ -179,6 +196,93 @@ def find_markets(keyword, raw_rows=None, offline=False):
         matches.append(market)
     print(f"Keyword '{keyword}' matched {len(matches)} markets in the downloaded pages.")
     return matches
+
+
+# Why: GET /events is a list of events, and each event carries its markets.
+# The events list rejects order=volumeNum. order=volume is the field that works.
+def fetch_event_page(offset, limit):
+    """Download one page of open events ordered by volume, highest first."""
+    url = "https://gamma-api.polymarket.com/events"
+    params = {
+        "limit": limit,
+        "offset": offset,
+        "order": "volume",
+        "ascending": "false",
+        "closed": "false",
+    }
+    response = requests.get(url, params=params, timeout=config.REQUEST_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise ValueError("Gamma /events did not return a list.")
+    return payload
+
+
+def _events_cache_path():
+    """Path of the raw event-page cache."""
+    return os.path.join(config.DATA_DIR, "event_pages.json")
+
+
+# Why: a failed events request must not wipe the market pages or the last good events file.
+def fetch_event_pages(offline=False):
+    """Walk offset pages of events. On failure, read data/event_pages.json."""
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    cache_path = _events_cache_path()
+    if offline:
+        return _read_pages_cache(cache_path)
+    rows = []
+    offset = 0
+    try:
+        for _page in range(config.MAX_EVENT_PAGES):
+            batch = fetch_event_page(offset, config.MARKET_PAGE_SIZE)
+            if len(batch) == 0:
+                break
+            for row in batch:
+                rows.append(row)
+            print(f"Fetched event page at offset {offset}: {len(batch)} rows.")
+            offset = offset + config.MARKET_PAGE_SIZE
+            if len(batch) < config.MARKET_PAGE_SIZE:
+                break
+    except (requests.RequestException, ValueError) as exc:
+        print(f"Event list request failed: {exc}")
+        cached = _read_pages_cache(cache_path)
+        if len(cached) > 0:
+            print("Using the cached event list.")
+            return cached
+        print("No event list. Wider markets will come from the market pages only.")
+        return rows
+    if len(rows) == 0:
+        print("Event list was empty. Trying the cache.")
+        cached = _read_pages_cache(cache_path)
+        if len(cached) == 0:
+            print("No event list. Wider markets will come from the market pages only.")
+        return cached
+    with open(cache_path, "w", encoding="utf-8") as handle:
+        json.dump(rows, handle)
+    return rows
+
+
+# Why: the event id on the parent is the one we use to keep a single headline contract.
+def markets_from_events(raw_events):
+    """Flatten nested markets and stamp each one with its parent event id."""
+    markets = []
+    if not isinstance(raw_events, list):
+        return markets
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("id") or "")
+        nested = event.get("markets") or []
+        if not isinstance(nested, list):
+            continue
+        for raw in nested:
+            if not isinstance(raw, dict):
+                continue
+            market = parse_market(raw)
+            if event_id != "":
+                market["event_id"] = event_id
+            markets.append(market)
+    return markets
 
 
 def _odds_cache_path(token_id):

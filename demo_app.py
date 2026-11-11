@@ -58,6 +58,14 @@ def show_pair(bundle, question, asset_name, selected_lag):
     corr_col.metric("Correlation", f"{result['corr']:.3f}")
     n_col.metric("Overlapping days", result["n_obs"])
     p_col.metric("Adjusted p-value", f"{result['adjusted_p']:.3f}")
+    core_p = result.get("core_adjusted_p")
+    if result.get("group") == "core" and core_p is not None:
+        st.caption(
+            f"Group: core. Full-sample adjusted p is {result['adjusted_p']:.3f} and decides the verdict. "
+            f"Core-only adjusted p is {core_p:.3f}. That uses only the Fed-style pairs."
+        )
+    elif result.get("group"):
+        st.caption(f"Group: {result.get('group')}. The verdict uses the full-sample adjusted p-value.")
     picked = correlation_at(result["lag_profile"], selected_lag)
     st.caption(
         f"Highlighted lag {selected_lag}: correlation {picked:.3f}. "
@@ -90,7 +98,8 @@ def main():
     st.set_page_config(page_title="Lead-lag monitor", layout="wide")
     st.title("Did Polymarket odds move first?")
     st.write(
-        "Fed, rate-cut, recession and inflation markets versus gold, the dollar index and the Nasdaq. "
+        "Core Fed, rate-cut, recession and inflation markets, plus other liquid Polymarket events, "
+        "versus gold, the dollar index and the Nasdaq. "
         "A positive lag means the odds moved first. This is not investment advice."
     )
     source = st.sidebar.radio(
@@ -126,7 +135,12 @@ def main():
     table = pandas.DataFrame(rows)
     table["corr"] = table["corr"].round(3)
     table["adjusted_p"] = table["adjusted_p"].round(3)
-    show_cols = ["market", "asset", "verdict", "lag", "corr", "n_obs", "adjusted_p"]
+    if "core_adjusted_p" not in table.columns:
+        table["core_adjusted_p"] = pandas.NA
+    table["core_adjusted_p"] = pandas.to_numeric(table["core_adjusted_p"], errors="coerce").round(3)
+    if "group" not in table.columns:
+        table["group"] = ""
+    show_cols = ["group", "market", "asset", "verdict", "lag", "corr", "n_obs", "adjusted_p", "core_adjusted_p"]
     st.dataframe(table[show_cols], width="stretch", hide_index=True)
     questions = []
     for market in bundle["chosen"]:

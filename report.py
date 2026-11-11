@@ -84,12 +84,16 @@ def save_overlay(odds, prices, title, path):
 # Why: the demo needs one picture that lists every verdict.
 def save_verdict_table(rows, path):
     """Save a table image. Each row is market, asset, lag, verdict."""
-    fig, ax = plt.subplots(figsize=(12, max(2, 0.45 * (len(rows) + 1))))
+    fig, ax = plt.subplots(figsize=(14, max(2, 0.45 * (len(rows) + 1))))
     ax.axis("off")
     if len(rows) == 0:
         ax.text(0.5, 0.5, "No pairs to show", ha="center")
     else:
-        table = ax.table(cellText=rows, colLabels=["Market", "Asset", "Lag", "Verdict"], loc="center")
+        table = ax.table(
+            cellText=rows,
+            colLabels=["Group", "Market", "Asset", "Lag", "Verdict"],
+            loc="center",
+        )
         table.auto_set_font_size(False)
         table.set_fontsize(8)
         table.scale(1, 1.4)
@@ -136,8 +140,10 @@ def build_report(chosen, rejected, verdicts, when=None):
     if len(chosen) == 0:
         lines.append("- none")
     for market in chosen:
+        group = market.get("group") or ""
+        label = f"[{group}] " if group != "" else ""
         lines.append(
-            f"- {market.get('question', '')} | volume {market.get('volume', 0):.0f} | "
+            f"- {label}{market.get('question', '')} | volume {market.get('volume', 0):.0f} | "
             f"points {market.get('n_points', 0)}"
         )
     lines.append("")
@@ -151,15 +157,25 @@ def build_report(chosen, rejected, verdicts, when=None):
     if len(verdicts) == 0:
         lines.append("- none")
     for row in verdicts:
+        group = row.get("group") or ""
+        label = f"[{group}] " if group != "" else ""
+        core_note = ""
+        core_p = row.get("core_adjusted_p")
+        if group == "core" and core_p is not None:
+            core_note = f" Core-only adjusted p={core_p:.3f} (does not change the verdict)."
         lines.append(
-            f"- {row['market']} vs {row['asset']}: {row['verdict']}. {row['reason']} "
+            f"- {label}{row['market']} vs {row['asset']}: {row['verdict']}. {row['reason']} "
             f"n={row['n_obs']}, corr={row['corr']:.3f}, "
             f"ADF odds p={row['adf_odds_p']:.3f}, ADF asset p={row['adf_asset_p']:.3f}."
+            f"{core_note}"
         )
     lines.append("")
     lines.append(
         "The correlation p-value is calculated at the lag with the largest correlation. "
-        "The adjusted p-value multiplies by the number of pairs and by the number of lags searched. "
+        "The adjusted p-value multiplies by every kept pair and by the number of lags searched. "
+        "That full-sample figure is the one the verdict uses. "
+        "Core markets also print a core-only adjusted p-value, using only the Fed-style pairs. "
+        "The core-only figure keeps that slice comparable. It does not change the verdict. "
         "The Granger p-value is the smallest one across lags, so it is easier to look significant "
         "than a test of one lag chosen in advance."
     )
@@ -238,6 +254,7 @@ def write_outputs(chosen, rejected, results, verdict_rows, odds_for_plot, prices
     for row in verdict_rows:
         table_rows.append(
             [
+                row.get("group") or "",
                 _short(row["market"], 42),
                 row["asset"],
                 str(row["lag"]),

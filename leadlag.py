@@ -141,8 +141,17 @@ def _one_pair(market, asset_name, asset_returns):
         "adf_asset_p": adf_pvalue(y),
         "passed_filter": True,
         "lag_profile": _lag_profile(x, y, config.MAX_LAG),
+        "group": "core",
+        "core_adjusted_p": None,
     }
     return result
+
+
+def _pair_group(market):
+    """Wider markets stay wider. Anything else is core, including a missing tag."""
+    if market.get("group") == "wider":
+        return "wider"
+    return "core"
 
 
 # Why: every pair is stored under (market name, asset name), as the brief requires.
@@ -151,19 +160,34 @@ def analyse_all(markets, assets):
     results = {}
     keys = []
     p_values = []
+    groups = []
     for market in markets:
         market_name = market.get("question", "")
+        group = _pair_group(market)
         for asset_name in assets:
             key = (market_name, asset_name)
             result = _one_pair(market, asset_name, assets[asset_name])
+            result["group"] = group
             results[key] = result
             keys.append(key)
             p_values.append(result["p_value"])
+            groups.append(group)
     # Each pair looks at every lag and keeps the strongest correlation.
     # Counting only the pairs would make that search look more significant than it is.
+    # The verdict uses this full-sample count. Core markets also store a second
+    # p-value that uses only the core pairs, so the Fed slice stays comparable.
     n_lags = config.MAX_LAG * 2 + 1
     n_tests = len(p_values) * n_lags
     adjusted = bonferroni(p_values, n_tests)
+    core_values = []
+    core_keys = []
     for index, key in enumerate(keys):
         results[key]["adjusted_p"] = adjusted[index]
+        if groups[index] == "core":
+            core_values.append(p_values[index])
+            core_keys.append(key)
+    if len(core_values) > 0:
+        core_adjusted = bonferroni(core_values, len(core_values) * n_lags)
+        for index, key in enumerate(core_keys):
+            results[key]["core_adjusted_p"] = core_adjusted[index]
     return results

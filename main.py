@@ -8,9 +8,15 @@ from dotenv import load_dotenv
 
 import config
 from align import first_cross_date, odds_changes, resample_daily
-from filters import rank_by_volume, select_markets
+from filters import headline_by_event, is_core_question, rank_by_volume, select_markets
 from leadlag import analyse_all
-from polymarket import fetch_market_pages, find_markets, get_price_history
+from polymarket import (
+    fetch_event_pages,
+    fetch_market_pages,
+    get_price_history,
+    markets_from_events,
+    parse_market,
+)
 from prices import download_prices, to_returns
 from report import append_sheet, send_telegram, write_outputs
 from tests import known_event_report, test_synthetic_lead
@@ -19,50 +25,141 @@ from verdict import make_verdict
 load_dotenv(os.path.join(config.BASE_DIR, ".env"))
 
 
-# Why: four keywords would otherwise download the same pages four times.
+def _remember_market(by_id, order, market):
+    """Store one market. A later copy can fill a missing event id. Core is not overwritten."""
+    market_id = market.get("market_id") or ""
+    if market_id == "":
+        return
+    if is_core_question(market.get("question") or ""):
+        market["group"] = "core"
+    else:
+        market["group"] = "wider"
+    existing = by_id.get(market_id)
+    if existing is None:
+        by_id[market_id] = market
+        order.append(market_id)
+        return
+    if (existing.get("event_id") or "") == "" and (market.get("event_id") or "") != "":
+        existing["event_id"] = market["event_id"]
+    if market.get("group") == "core":
+        existing["group"] = "core"
+
+
+# Why: keyword markets stay in the core. Other events are added beside them, one headline each.
 def collect_markets(offline):
-    """Page the Gamma market list once, then keep questions that match any keyword."""
+    """Page markets and events once. Return core markets plus one wider market per event."""
     raw_rows = fetch_market_pages(offline=offline)
-    found = []
-    seen_ids = []
-    for keyword in config.MARKET_KEYWORDS:
-        matches = find_markets(keyword, raw_rows=raw_rows, offline=offline)
-        for market in matches:
-            if market["market_id"] in seen_ids:
-                continue
-            seen_ids.append(market["market_id"])
-            found.append(market)
-    print(f"Unique markets after all keywords: {len(found)}.")
-    return found
-
-
-# Why: downloading odds for every name would miss the three-minute demo limit.
-def download_top_odds(markets, offline):
-    """Download Yes-token history for the highest-volume names. The rest are rejected."""
-    ranked = rank_by_volume(markets)
+    raw_events = fetch_event_pages(offline=offline)
+    by_id = {}
+    order = []
+    for raw in raw_rows:
+        if isinstance(raw, dict):
+            _remember_market(by_id, order, parse_market(raw))
+    for market in markets_from_events(raw_events):
+        _remember_market(by_id, order, market)
+    core = []
+    wider = []
+    for market_id in order:
+        market = by_id[market_id]
+        if market.get("group") == "core":
+            core.append(market)
+        else:
+            wider.append(market)
+    open_wider = []
+    closed_wider = 0
+    for market in wider:
+        if market.get("closed"):
+            closed_wider = closed_wider + 1
+        else:
+            open_wider.append(market)
+    headlines, dropped = headline_by_event(open_wider)
+    print(f"Core keyword markets: {len(core)}.")
+    print(f"Wider headlines: {len(headlines)}.")
+    if closed_wider > 0:
+        print(f"Skipped {closed_wider} closed wider markets.")
     rejected = []
-    downloaded = []
+    if len(dropped) > 0:
+        rejected.append(
+            {
+                "question": f"{len(dropped)} wider markets",
+                "reason": "another market in the same event has higher volume, so history was not fetched",
+            }
+        )
+    found = []
+    for market in core:
+        found.append(market)
+    for market in headlines:
+        found.append(market)
+    return found, rejected
+
+
+def _download_one(market, offline):
+    """Attach daily odds to one market and print the first 50 percent date."""
+    print(f"Odds history ({market.get('group', 'core')}): {market['question']}")
+    history = get_price_history(market["yes_token_id"], offline=offline)
+    daily = resample_daily(history)
+    market["daily_odds"] = daily
+    market["n_points"] = int(len(daily))
+    market["odds_change"] = odds_changes(daily)
+    cross = first_cross_date(daily, 0.50)
+    if cross is None:
+        print("  First date at or above 50% odds: none in this sample.")
+    else:
+        print(f"  First date at or above 50% odds: {pandas_date(cross)}.")
+    return market
+
+
+def _cap_ranked(markets, limit, list_each):
+    """Keep the highest-volume names up to limit. Return (kept, rejection rows)."""
+    ranked = rank_by_volume(markets)
+    kept = []
+    overflow = []
     for index, market in enumerate(ranked):
-        if index >= config.MAX_DOWNLOADS:
+        if index < limit:
+            kept.append(market)
+        else:
+            overflow.append(market)
+    rejected = []
+    if list_each:
+        for market in overflow:
             rejected.append(
                 {
                     "question": market["question"],
                     "reason": "outside the download limit, so history was not fetched",
                 }
             )
-            continue
-        print(f"Odds history: {market['question']}")
-        history = get_price_history(market["yes_token_id"], offline=offline)
-        daily = resample_daily(history)
-        market["daily_odds"] = daily
-        market["n_points"] = int(len(daily))
-        market["odds_change"] = odds_changes(daily)
-        cross = first_cross_date(daily, 0.50)
-        if cross is None:
-            print("  First date at or above 50% odds: none in this sample.")
+    elif len(overflow) > 0:
+        rejected.append(
+            {
+                "question": f"{len(overflow)} wider events",
+                "reason": "outside the download limit, so history was not fetched",
+            }
+        )
+    return kept, rejected
+
+
+# Why: each pool has its own download cap, so the core is not crowded out before the test.
+def download_top_odds(markets, offline):
+    """Download Yes-token history for the top core names and the top wider headlines."""
+    core = []
+    wider = []
+    for market in markets:
+        if market.get("group") == "wider":
+            wider.append(market)
         else:
-            print(f"  First date at or above 50% odds: {pandas_date(cross)}.")
-        downloaded.append(market)
+            core.append(market)
+    core_keep, core_rejected = _cap_ranked(core, config.MAX_CORE_DOWNLOADS, True)
+    wider_keep, wider_rejected = _cap_ranked(wider, config.MAX_WIDER_DOWNLOADS, False)
+    downloaded = []
+    for market in core_keep:
+        downloaded.append(_download_one(market, offline))
+    for market in wider_keep:
+        downloaded.append(_download_one(market, offline))
+    rejected = []
+    for item in core_rejected:
+        rejected.append(item)
+    for item in wider_rejected:
+        rejected.append(item)
     return downloaded, rejected
 
 
@@ -110,9 +207,11 @@ def strongest_key(results):
 
 def load_analysis(offline):
     """Load markets and prices, then return the verdicts. Does not send the report."""
-    markets = collect_markets(offline)
+    markets, catalog_rejected = collect_markets(offline)
     downloaded, early_rejected = download_top_odds(markets, offline)
     chosen, rejected = select_markets(downloaded)
+    for item in catalog_rejected:
+        rejected.append(item)
     for item in early_rejected:
         rejected.append(item)
     start, end = price_window(chosen)
@@ -138,6 +237,7 @@ def load_analysis(offline):
             {
                 "market": market_name,
                 "asset": asset_name,
+                "group": result.get("group") or "core",
                 "verdict": label,
                 "reason": reason,
                 "lag": result["best_lag"],
@@ -145,6 +245,7 @@ def load_analysis(offline):
                 "corr": result["corr"],
                 "p_value": result["p_value"],
                 "adjusted_p": result["adjusted_p"],
+                "core_adjusted_p": result.get("core_adjusted_p"),
                 "granger_forward": result["granger_odds_to_asset_p"],
                 "granger_back": result["granger_asset_to_odds_p"],
                 "adf_odds_p": result["adf_odds_p"],
@@ -203,7 +304,9 @@ def run(offline):
     sheet_rows = []
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for row in verdict_rows:
-        sheet_rows.append([stamp, row["market"], row["asset"], row["verdict"], row["lag"], row["n_obs"]])
+        sheet_rows.append(
+            [stamp, row.get("group", ""), row["market"], row["asset"], row["verdict"], row["lag"], row["n_obs"]]
+        )
     append_sheet(sheet_rows)
     print("Done.")
     return results

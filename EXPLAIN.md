@@ -18,7 +18,7 @@ On 9 Nov 2026 every tested pair was `NO RELIABLE LEAD`. That is a real result, n
 
 ## config.py
 
-This file only holds settings: asset tickers, keywords, the minimum volume (100,000), the minimum number of daily odds points (30), the maximum lag (5), alpha (0.05), and how many market pages to download.
+This file only holds settings: asset tickers, the core keywords, the minimum volume (100,000), the minimum number of daily odds points (30), the maximum lag (5), alpha (0.05), how many market pages to download, and how many events to add. The core quota is 5. The wider quota is 10. Odds downloads are capped at 8 core names and 15 wider headlines, before the liquidity cut. Event pages are capped at 3.
 
 `KNOWN_EVENT` is blank on purpose. The team fills in a real past event. The program will not invent a Fed date or a surprise.
 
@@ -28,9 +28,11 @@ This file only holds settings: asset tickers, keywords, the minimum volume (100,
 
 ## polymarket.py
 
-`fetch_market_pages` calls `GET https://gamma-api.polymarket.com/markets` in a for loop. Each request uses `limit`, `offset`, `order=volumeNum`, `ascending=false` and `closed=false`. Those parameters are in the official list-markets docs. The live response is a list. The fields we keep are `id`, `question`, `clobTokenIds`, `outcomes`, `volumeNum`, `liquidityNum`, `endDate` and `closed`.
+`fetch_market_pages` calls `GET https://gamma-api.polymarket.com/markets` in a for loop. Each request uses `limit`, `offset`, `order=volumeNum`, `ascending=false` and `closed=false`. Those parameters are in the official list-markets docs. The live response is a list. The fields we keep are `id`, `question`, `clobTokenIds`, `outcomes`, `volumeNum`, `liquidityNum`, `endDate`, `closed`, and the parent event id when the payload includes one.
 
-The list endpoint has no keyword argument. That was checked in the docs. `find_markets` therefore keeps a market only when the keyword appears in the question. We stop after 8 pages (800 markets). A full catalog scan would be slow, and offset paging is capped.
+The list endpoint has no keyword argument. That was checked in the docs. `find_markets` therefore keeps a market only when the keyword appears in the question. The daily run does not stop there. Matching questions are tagged `core`. Every other open market in the pages can enter the wider pool. We stop after 8 pages (800 markets). A full catalog scan would be slow, and offset paging is capped.
+
+`fetch_event_pages` calls `GET https://gamma-api.polymarket.com/events` with open events, highest volume first, three pages. The events list accepts `order=volume`. It rejects `volumeNum`, which is the field the market list uses. Each event has a `markets` list. `markets_from_events` copies the parent event id onto those markets. If that request fails, the wider sample falls back to non-keyword markets already in the market pages. A market with no event id is treated as its own event.
 
 `clobTokenIds` and `outcomes` arrive as JSON text, not as Python lists. `parse_json_list` turns them into lists. On the markets checked live, the first outcome was "Yes" and the first token was the Yes token. We use the Yes token because the question is a Yes/No question and the Yes price is the probability.
 
@@ -44,9 +46,11 @@ The list endpoint has no keyword argument. That was checked in the docs. `find_m
 
 `is_liquid` returns true only when the market is open and volume is at least `MIN_VOLUME` and the daily history is at least `MIN_POINTS`. The conditions use `and`, `or` and `not`.
 
-`rank_by_volume` is a best-so-far loop. It walks the list, remembers the highest volume seen so far, takes that market, then repeats on what is left. `select_markets` keeps at most five liquid markets and records a reason for every rejection.
+`rank_by_volume` is a best-so-far loop. It walks the list, remembers the highest volume seen so far, takes that market, then repeats on what is left. `select_markets` keeps two quotas. Up to five liquid core markets, the ones whose question matches Fed, rate cut, recession or inflation. Then up to ten liquid wider markets. Wider markets are headlines: `headline_by_event` keeps the highest-volume contract in each event and rejects the rest. A core market is kept even when a wider market has more volume. Every rejection is stored with a reason.
 
 **Why reject closed markets?** A live monitor is about markets that are still trading. Closed markets would mix the resolution jump into the series.
+
+**Why one market per wider event?** An election or a crypto question can list many outcomes. Taking all of them would fill the extra slots with one story. The core Fed markets are not cut down this way. Several Fed questions can stay in the core together.
 
 ## prices.py
 
@@ -74,7 +78,7 @@ The list endpoint has no keyword argument. That was checked in the docs. `find_m
 
 `adf_pvalue` is the Augmented Dickey-Fuller test. A small p-value means the series does not look like a random walk. Granger is built for stationary series. We run it on changes, which are the right object, and we still print the ADF p-value. On 9 Nov 2026 the December-meeting market versus the Nasdaq had an asset ADF p-value of 0.24, so that shorter return series did not look stationary. The verdict does not treat that pair as a lead anyway.
 
-`bonferroni` multiplies each p-value by the number of tests and caps the result at 1. `analyse_all` stores one dictionary per pair. The key is `(market question, asset name)`. The number of tests is the number of pairs times the number of lags (11 when max lag is 5), because the lag was chosen by searching.
+`bonferroni` multiplies each p-value by the number of tests and caps the result at 1. `analyse_all` stores one dictionary per pair. The key is `(market question, asset name)`. The verdict uses the full sample: every kept pair times the number of lags (11 when max lag is 5), because the lag was chosen by searching. Core pairs also store `core_adjusted_p`, which multiplies by the core pairs only. That second number is printed so the Fed slice can be compared with the earlier five-market run. It does not decide the label. A wider search makes the full-sample p-value larger, so a Fed pair can look weaker only because more markets were tested.
 
 **Why correct for the lags?** If you test 11 lags and then quote the p-value of the winner, you will find "significant" correlations too often. The placebo test shows the raw rate. Over 30 shuffles it was about 0.10, above alpha. After multiplying by the 11 lags, the false-lead rate in that run was 0.00.
 
@@ -87,7 +91,8 @@ The list endpoint has no keyword argument. That was checked in the docs. `find_m
 `python tests.py` runs every check.
 
 - Parsing uses a made-up Gamma object and a made-up price-history payload. It does not need the network.
-- Filters use made-up markets.
+- Filters use made-up markets. A lower-volume Fed market is kept beside a larger non-Fed market. A second contract from the same event does not take another wider slot when a different event is available.
+- The full-sample adjusted p-value uses every pair. The core-only p-value uses only the core pairs. A wider market has no core-only p-value.
 - Returns: 100 then 110 must give 10.
 - Align uses three hand-written timestamps.
 - Synthetic: the asset is the odds shifted by 2 plus tiny noise. `best_lag` must return 2.
@@ -102,7 +107,7 @@ This is the page for the live talk. Run it with `streamlit run demo_app.py`. It 
 
 The sidebar starts on cached files. That is the safe demo path. "Fetch live" is a button, so opening the page does not call the API by itself. `st.session_state` is a dictionary Streamlit keeps while the page is open. The tests are stored there on the first load, so changing the market dropdown does not run Granger again.
 
-The lag buttons do not change the verdict. They only highlight one lag and show the correlation the program already computed. Dark blue is the best lag. The verdict box is green, amber, or red so it can be read from the back of the room.
+The lag buttons do not change the verdict. They only highlight one lag and show the correlation the program already computed. Dark blue is the best lag. The verdict box is green, amber, or red so it can be read from the back of the room. The table has a group column, `core` or `wider`. A core row also shows the core-only adjusted p-value. The verdict still uses the full-sample adjusted p-value.
 
 **Why Streamlit?** It is a Python library that turns the same functions into a clickable page. The professor's library marks include charts and working with other systems. The calculation still lives in the other files.
 
@@ -112,7 +117,7 @@ The lag buttons do not change the verdict. They only highlight one lag and show 
 
 Telegram uses `POST https://api.telegram.org/bot<token>/sendMessage`. Google Sheets uses `gspread` if a credentials file and a sheet id are in `.env`. Either failure is printed and swallowed.
 
-`main.py` is the pipeline: page the markets, keep keyword matches, download the eight highest-volume odds histories, filter to five, download the three asset prices over the odds window, run the tests, write the report, try to send it. `--offline` never calls the network.
+`main.py` is the pipeline: page the markets and the events, keep every core keyword match, keep one headline from each other event, download up to eight core histories and fifteen wider histories, filter to the two quotas, download the three asset prices over the odds window, run the tests, write the report, try to send it. `--offline` never calls the network. The report tags each market `core` or `wider`.
 
 ## What this run can and cannot say
 
@@ -125,7 +130,7 @@ Checked live on 9 Nov 2026:
 
 Cannot say:
 
-- That prediction markets do not work. We only looked at daily Fed-related contracts in the top volume pages, against three assets, for leads of at most five trading days.
+- That prediction markets do not work. The sample is daily and open: the Fed-style core, plus other liquid events from the paged lists, against three assets, for leads of at most five trading days. Sports or crypto contracts are in that wider set on purpose. They are liquid, and they are not expected to lead gold, the dollar, or the Nasdaq. The run still does not cover the whole catalog, and it still does not use closed markets.
 - That there is no link inside the same day. A daily last print cannot see an hourly lead.
 - A live calibration of resolved markets. The daily path downloads open markets only.
 - That Telegram or Google Sheets work on this machine. No token and no sheet were configured, so those steps were skipped on purpose.

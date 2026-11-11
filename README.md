@@ -1,6 +1,6 @@
 # Prediction-market lead-lag monitor
 
-Course project for ECON3086. The program asks a narrow question: in past daily data, did Polymarket odds on Fed, rate-cut, recession or inflation markets move before gold, the US dollar index, or the Nasdaq?
+Course project for ECON3086. The program asks a narrow question: in past daily data, did Polymarket odds move before gold, the US dollar index, or the Nasdaq? The core sample is still Fed, rate-cut, recession and inflation markets. On top of that, the run keeps other liquid open events, such as politics or crypto, one headline contract per event.
 
 It does not prove that odds cause prices, and it is not investment advice.
 
@@ -34,7 +34,7 @@ A full online run on that date finished in well under three minutes.
 
 ## Example result (9 Nov 2026)
 
-Five open Fed markets were tested against gold (`GC=F`), the dollar index (`DX-Y.NYB`) and the Nasdaq Composite (`^IXIC`). All three tickers returned prices.
+That run, before the wider sample, tested five open Fed markets against gold (`GC=F`), the dollar index (`DX-Y.NYB`) and the Nasdaq Composite (`^IXIC`). All three tickers returned prices. A current run still keeps up to five of those core markets, then adds up to ten other liquid events.
 
 Every pair was labelled **NO RELIABLE LEAD**.
 
@@ -60,4 +60,4 @@ A cron line on macOS or Linux, running at 07:10, looks like this:
 
 ## Limits
 
-Odds leading prices in a past sample is not causation and not a forecast. Thin markets are easy to push around. A late swing in one contract does not say that prediction markets fail in general. Details are in `output/report.txt` and in `EXPLAIN.md`.
+Odds leading prices in a past sample is not causation and not a forecast. Thin markets are easy to push around. A late swing in one contract does not say that prediction markets fail in general. The wider sample is still only the paged open events, not the whole catalog. Details are in `output/report.txt` and in `EXPLAIN.md`.
