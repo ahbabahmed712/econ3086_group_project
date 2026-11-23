@@ -1,13 +1,15 @@
 # Visual demo page. It calls the same pipeline as main.py.
 # Cached files are the default so the presentation still works if the API is down.
 
+import os
+
 import matplotlib.pyplot as plt
 import pandas
 import streamlit as st
 
 import config
-from main import load_analysis, strongest_key
-from report import LIMITS_TEXT, make_lag_figure, make_overlay_figure
+from main import load_analysis, run, sheet_rows_from_verdicts, strongest_key
+from report import LIMITS_TEXT, make_lag_figure, make_overlay_figure, telegram_summary
 
 
 # Why: changing a dropdown should not recompute every Granger test.
@@ -93,6 +95,29 @@ def show_pair(bundle, question, asset_name, selected_lag):
     )
 
 
+def _channel_status(ok, name, configured):
+    """One line for Telegram or Google Sheets after main.py finishes."""
+    if not configured:
+        return f"{name} skipped: .env is blank."
+    if ok:
+        return f"{name} sent."
+    return f"{name} failed. The terminal running Streamlit has the reason."
+
+
+def _delivery_message(bundle):
+    """Say what main.py wrote, and whether Telegram and the sheet were sent."""
+    rows = sheet_rows_from_verdicts(bundle["verdict_rows"])
+    telegram_ready = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() != "" and os.getenv("TELEGRAM_CHAT_ID", "").strip() != ""
+    sheet_ready = os.getenv("GOOGLE_CREDENTIALS_FILE", "").strip() != "" and os.getenv("GOOGLE_SHEET_ID", "").strip() != ""
+    lines = [
+        "output/report.txt and the charts were rewritten.",
+        _channel_status(bundle.get("telegram_ok"), "Telegram", telegram_ready),
+        _channel_status(bundle.get("sheet_ok"), "Google Sheets", sheet_ready),
+        telegram_summary(rows),
+    ]
+    return "\n".join(lines)
+
+
 def main():
     """Build the page: summary table, then one pair the speaker can click through."""
     st.set_page_config(page_title="Lead-lag monitor", layout="wide")
@@ -106,6 +131,18 @@ def main():
         "Data source",
         ["Cached files (use this in the demo)", "Fetch live"],
     )
+    st.sidebar.caption(
+        "Run main.py downloads fresh data, rewrites output/report.txt and the charts, "
+        "then sends Telegram and Google Sheets when .env is filled. It can take a few minutes."
+    )
+    if st.sidebar.button("Run main.py"):
+        with st.spinner("Running main.py..."):
+            finished = run(offline=False)
+        st.session_state["cached_bundle"] = finished
+        st.session_state["live_bundle"] = finished
+        st.session_state["main_message"] = _delivery_message(finished)
+    if st.session_state.get("main_message"):
+        st.sidebar.success(st.session_state["main_message"])
     offline = source.startswith("Cached")
     if not offline:
         st.sidebar.warning("Live mode calls Polymarket and Yahoo. Use cached files if the room Wi-Fi fails.")

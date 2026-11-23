@@ -1,4 +1,7 @@
 .env
+telegram_bot_token
+google-credentials.json
+*-service-account.json
 data/*.csv
 data/*.json
 output/*

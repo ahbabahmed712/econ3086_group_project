@@ -1,6 +1,7 @@
 # Daily pipeline: markets, filter, odds, prices, lead-lag, verdict, report.
 
 import argparse
+import csv
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -18,7 +19,7 @@ from polymarket import (
     parse_market,
 )
 from prices import download_prices, to_returns
-from report import append_sheet, send_telegram, write_outputs
+from report import append_sheet, send_telegram, telegram_summary, write_outputs
 from tests import known_event_report, test_synthetic_lead
 from verdict import make_verdict
 
@@ -300,16 +301,74 @@ def run(offline):
     )
     print(text)
     print("Step 9: optional delivery.")
-    send_telegram(text)
-    sheet_rows = []
+    telegram_ok, sheet_ok = deliver(text, sheet_rows_from_verdicts(verdict_rows))
+    bundle["telegram_ok"] = telegram_ok
+    bundle["sheet_ok"] = sheet_ok
+    print("Done.")
+    return bundle
+
+
+def sheet_rows_from_verdicts(verdict_rows):
+    """One sheet row per pair: date, group, market, asset, verdict, lag, overlapping days."""
+    rows = []
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for row in verdict_rows:
-        sheet_rows.append(
-            [stamp, row.get("group", ""), row["market"], row["asset"], row["verdict"], row["lag"], row["n_obs"]]
+        rows.append(
+            [
+                stamp,
+                row.get("group", ""),
+                row["market"],
+                row["asset"],
+                row["verdict"],
+                row["lag"],
+                row["n_obs"],
+            ]
         )
-    append_sheet(sheet_rows)
-    print("Done.")
-    return results
+    return rows
+
+
+def save_sheet_rows(rows):
+    """Write the sheet rows so a later delivery does not have to recompute the tests."""
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(config.OUTPUT_DIR, "sheet_rows.csv")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["date", "group", "market", "asset", "verdict", "lag", "n_obs"])
+        for row in rows:
+            writer.writerow(row)
+    print(f"Wrote {path}")
+    return path
+
+
+def load_saved_delivery():
+    """Read the last report and sheet rows. Return (text, rows) or (None, None)."""
+    report_path = os.path.join(config.OUTPUT_DIR, "report.txt")
+    rows_path = os.path.join(config.OUTPUT_DIR, "sheet_rows.csv")
+    if not os.path.exists(report_path) or not os.path.exists(rows_path):
+        print("No saved report to deliver. Run python main.py --offline once first.")
+        return None, None
+    with open(report_path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    rows = []
+    with open(rows_path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = True
+        for record in reader:
+            if header:
+                header = False
+                continue
+            if len(record) == 0:
+                continue
+            rows.append(record)
+    return text, rows
+
+
+def deliver(text, sheet_rows):
+    """Send the report to Telegram and append the pairs to Google Sheets."""
+    save_sheet_rows(sheet_rows)
+    telegram_ok = send_telegram(telegram_summary(sheet_rows))
+    sheet_ok = append_sheet(sheet_rows)
+    return telegram_ok, sheet_ok
 
 
 def main():
@@ -320,7 +379,19 @@ def main():
         action="store_true",
         help="Use cached CSV and JSON files only. Do not call the network.",
     )
+    parser.add_argument(
+        "--deliver",
+        action="store_true",
+        help="Send the last saved report to Telegram and Google Sheets. Do not recompute.",
+    )
     args = parser.parse_args()
+    if args.deliver:
+        text, sheet_rows = load_saved_delivery()
+        if text is None:
+            return
+        deliver(text, sheet_rows)
+        print("Done.")
+        return
     run(offline=args.offline)
 
 

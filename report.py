@@ -1,6 +1,7 @@
 # Charts, a text report, and optional Telegram or Google Sheet delivery.
 
 import os
+import time
 from datetime import datetime, timezone
 
 import matplotlib
@@ -185,6 +186,81 @@ def build_report(chosen, rejected, verdicts, when=None):
     return "\n".join(lines)
 
 
+# Telegram refuses a message longer than this. The report is split on line breaks.
+TELEGRAM_LIMIT = 3900
+# How long one sendMessage call may sit with no reply, and how many times to try.
+TELEGRAM_TIMEOUT = 60
+TELEGRAM_TRIES = 3
+# A 429 does not clear if we call again. The next real try waits this long.
+TELEGRAM_COOLDOWN = 600
+
+# First row of the Google Sheet. One later row is one market-asset pair.
+SHEET_HEADER = ["date", "group", "market", "asset", "verdict", "lag", "n_obs"]
+
+
+# Why: the full report is too long for a chat. Telegram gets the counts, plus any real lead.
+def telegram_summary(rows):
+    """Build one short message from sheet rows. The full report stays in output/report.txt."""
+    if rows is None or len(rows) == 0:
+        return "Lead-lag update\nNo pairs to report."
+    counts = {"LEAD DETECTED": 0, "NO RELIABLE LEAD": 0, "DATA TOO THIN": 0}
+    leads = []
+    stamp = str(rows[0][0])
+    for row in rows:
+        verdict = str(row[4])
+        if verdict in counts:
+            counts[verdict] = counts[verdict] + 1
+        else:
+            counts[verdict] = counts.get(verdict, 0) + 1
+        if verdict == "LEAD DETECTED":
+            leads.append(row)
+    lines = [
+        f"Lead-lag update {stamp}",
+        (
+            f"{len(rows)} pairs. Leads: {counts['LEAD DETECTED']}. "
+            f"No reliable lead: {counts['NO RELIABLE LEAD']}. "
+            f"Too thin: {counts['DATA TOO THIN']}."
+        ),
+    ]
+    if len(leads) == 0:
+        lines.append("No pair passed the lead rule.")
+    else:
+        shown = 0
+        for row in leads:
+            if shown == 5:
+                break
+            question = str(row[2])
+            if len(question) > 80:
+                question = question[:77] + "..."
+            lines.append(f"LEAD: {question} vs {row[3]}, lag {row[5]}, n={row[6]}")
+            shown = shown + 1
+        extra = len(leads) - shown
+        if extra > 0:
+            lines.append(f"And {extra} more leads.")
+    lines.append("Full results stay in output/report.txt.")
+    return "\n".join(lines)
+
+
+# Why: a 45-pair report is longer than one Telegram message.
+def telegram_chunks(text, limit=TELEGRAM_LIMIT):
+    """Split text into pieces Telegram will accept. Break on a newline when possible."""
+    if text is None or text == "":
+        return []
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+        if remaining.startswith("\n"):
+            remaining = remaining[1:]
+    if remaining != "":
+        chunks.append(remaining)
+    return chunks
+
+
 # Why: sending the report is optional. A missing token must not stop the program.
 def send_telegram(text, token=None, chat_id=None):
     """Post the report to Telegram. Return False, and do not raise, when it cannot."""
@@ -192,22 +268,118 @@ def send_telegram(text, token=None, chat_id=None):
         token = os.getenv("TELEGRAM_BOT_TOKEN", "") or ""
     if chat_id is None:
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "") or ""
+    token = str(token).strip()
+    chat_id = str(chat_id).strip()
     if token == "" or chat_id == "":
         print("Telegram skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty.")
         return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        response = requests.post(
-            url,
-            data={"chat_id": chat_id, "text": text[:4000]},
-            timeout=config.REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        print("Telegram message sent.")
-        return True
-    except requests.RequestException as exc:
-        print(f"Telegram failed: {exc}")
+    paused = _cooldown_until()
+    if time.time() < paused:
+        print(_cooldown_message(paused))
         return False
+    chunks = telegram_chunks(text)
+    if len(chunks) == 0:
+        print("Telegram skipped: the report text was empty.")
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    for index, chunk in enumerate(chunks):
+        body = chunk
+        if len(chunks) > 1:
+            body = f"({index + 1}/{len(chunks)})\n{chunk}"
+        posted = _post_telegram(url, chat_id, body, index + 1)
+        if not posted:
+            return False
+        sent = sent + 1
+        if index + 1 < len(chunks):
+            time.sleep(1)
+    _clear_cooldown()
+    print(f"Telegram message sent in {sent} part(s).")
+    return True
+
+
+def _post_telegram(url, chat_id, body, part_number):
+    """POST one message. Retry a timeout or a 429. Return True when Telegram accepts it."""
+    attempt = 1
+    while attempt <= TELEGRAM_TRIES:
+        try:
+            response = requests.post(
+                url,
+                data={"chat_id": chat_id, "text": body},
+                timeout=TELEGRAM_TIMEOUT,
+            )
+        except requests.RequestException:
+            if attempt == TELEGRAM_TRIES:
+                print(f"Telegram failed on part {part_number}: no reply from api.telegram.org.")
+                return False
+            print(f"Telegram part {part_number} got no reply. Trying again.")
+            time.sleep(5)
+            attempt = attempt + 1
+            continue
+        if response.status_code == 429:
+            # Calling again restarts Telegram's block, so this run stops and waits locally.
+            wait = TELEGRAM_COOLDOWN
+            try:
+                asked = int(response.json().get("parameters", {}).get("retry_after", TELEGRAM_COOLDOWN))
+            except (ValueError, TypeError):
+                asked = TELEGRAM_COOLDOWN
+            if asked > wait:
+                wait = asked
+            paused = _set_cooldown(wait)
+            print(_cooldown_message(paused))
+            return False
+        if response.status_code >= 400:
+            print(f"Telegram failed on part {part_number}: HTTP {response.status_code}.")
+            return False
+        return True
+    print(f"Telegram failed on part {part_number} after {TELEGRAM_TRIES} tries.")
+    return False
+
+
+def _cooldown_path():
+    """Local clock for the Telegram block. This file is not sent anywhere."""
+    return os.path.join(config.OUTPUT_DIR, "telegram_cooldown.txt")
+
+
+def _cooldown_until():
+    """Return the epoch time when Telegram may be called again. 0 means no pause."""
+    path = _cooldown_path()
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return float(handle.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _set_cooldown(seconds):
+    """Remember not to call Telegram until this many seconds from now."""
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    until = time.time() + seconds
+    with open(_cooldown_path(), "w", encoding="utf-8") as handle:
+        handle.write(str(until))
+    return until
+
+
+def _clear_cooldown():
+    """Drop the pause after a message is accepted."""
+    path = _cooldown_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def _cooldown_message(until):
+    """Tell the user the local time when one more try is safe."""
+    when = datetime.fromtimestamp(until).strftime("%H:%M")
+    return f"Telegram is paused until {when}. Another try before then restarts the block."
+
+
+def _credentials_path(path):
+    """A relative credentials path is looked up next to config.py."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(config.BASE_DIR, path)
 
 
 # Why: a sheet is a second copy of the verdicts. Login failures must not crash the run.
@@ -220,13 +392,23 @@ def append_sheet(rows, credentials_file=None, sheet_id=None):
     if credentials_file == "" or sheet_id == "":
         print("Google Sheet skipped: GOOGLE_CREDENTIALS_FILE or GOOGLE_SHEET_ID is empty.")
         return False
+    credentials_file = _credentials_path(credentials_file)
+    if not os.path.exists(credentials_file):
+        print(f"Google Sheet skipped: credentials file not found at {credentials_file}.")
+        return False
     try:
         import gspread
 
         client = gspread.service_account(filename=credentials_file)
         sheet = client.open_by_key(sheet_id).sheet1
+        first = sheet.row_values(1)
+        if len(first) == 0:
+            sheet.append_row(SHEET_HEADER)
         for row in rows:
-            sheet.append_row(row)
+            values = []
+            for value in row:
+                values.append(str(value))
+            sheet.append_row(values)
         print(f"Appended {len(rows)} rows to the Google Sheet.")
         return True
     except Exception as exc:

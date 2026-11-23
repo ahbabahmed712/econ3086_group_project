@@ -15,6 +15,26 @@ copy .env.example .env
 
 On macOS or Linux, use `cp .env.example .env`. Leave the Telegram and Google values blank unless you want delivery. Blank values are skipped. The program does not crash.
 
+## Telegram and Google Sheets
+
+These copy a report that is already written to `output/report.txt`. Fill `.env`, then run `python main.py --offline` or, if that report already exists, `python main.py --deliver`.
+
+Telegram:
+
+1. In Telegram, open `@BotFather`, send `/newbot`, and copy the token into `TELEGRAM_BOT_TOKEN`.
+2. Send any message to that new bot.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` and copy the `chat.id` number into `TELEGRAM_CHAT_ID`.
+
+Google Sheets:
+
+1. In Google Cloud, create a project and turn on the Google Sheets API.
+2. Create a service account and download its JSON key. Save the file as `google-credentials.json` in this folder. Do not commit it.
+3. Create a spreadsheet and share it with the service-account email as an Editor.
+4. Copy the long id from the sheet URL (`/d/<id>/edit`) into `GOOGLE_SHEET_ID`.
+5. Set `GOOGLE_CREDENTIALS_FILE=google-credentials.json`.
+
+The first row of an empty sheet is `date, group, market, asset, verdict, lag, n_obs`. Each later row is one market-asset pair. Telegram gets a short count of leads, not the full report. The full text stays in `output/report.txt`.
+
 ## Run
 
 From this folder:

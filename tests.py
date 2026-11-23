@@ -28,7 +28,7 @@ from polymarket import (
     yes_token_id,
 )
 from prices import close_from_frame, to_returns
-from report import append_sheet, build_report, make_lag_figure, send_telegram
+from report import append_sheet, build_report, make_lag_figure, send_telegram, telegram_chunks, telegram_summary
 from verdict import make_verdict
 
 
@@ -555,12 +555,27 @@ def test_report_and_delivery():
     assert "Core-only adjusted p=0.200" in text
     assert "does not prove causation" in text
     assert send_telegram("hello", token="", chat_id="") is False
+    summary = telegram_summary(
+        [["2026-11-21", "core", "Sample question", "Gold", "NO RELIABLE LEAD", "1", "40"]]
+    )
+    assert "2026-11-21" in summary
+    assert "Leads: 0" in summary
+    assert "No pair passed the lead rule." in summary
+    assert len(summary) < 500
+    assert telegram_chunks("") == []
+    assert telegram_chunks("short") == ["short"]
+    long_text = ("line\n" * 2000)
+    pieces = telegram_chunks(long_text, limit=100)
+    assert len(pieces) > 1
+    for piece in pieces:
+        assert len(piece) <= 100
     profile = [{"lag": -1, "corr": 0.1}, {"lag": 0, "corr": 0.2}, {"lag": 1, "corr": 0.4}]
     fig = make_lag_figure("Gold", profile, 1, selected_lag=0)
     assert fig.axes[0].get_title().startswith("Gold")
     import matplotlib.pyplot as plt
     plt.close(fig)
     assert append_sheet([["a"]], credentials_file="", sheet_id="") is False
+    assert append_sheet([["a"]], credentials_file="missing-key.json", sheet_id="abc") is False
     _say("report", True)
 
 
